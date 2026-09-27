@@ -1,38 +1,50 @@
 (() => {
   "use strict";
 
-  const APP_ID = "novel-txt-backup-overlay-v6-1";
+  const APP_ID = "novel-txt-backup-overlay-v6-2";
 
   const POLL_MS = 400;
   const NORMAL_TIMEOUT_MS = 45000;
   const MANUAL_AUTH_TIMEOUT_MS = 10 * 60 * 1000;
   const BETWEEN_EPISODES_MS = 900;
 
-  // 정상적으로 20개 회차를 수집할 때마다 수집창 교체
+  // 정상 수집 20화마다 수집창 교체
   const ROTATE_EVERY_EPISODES = 20;
 
-  // 실수로 창을 닫거나 일반 로딩 실패가 났을 때
-  // 같은 화를 새 창으로 다시 시도하는 횟수
+  // 창 실수로 닫힘 / 일시적 로딩 실패 시 재시도 횟수
   const MAX_RECOVERY_RETRIES = 2;
 
   const RESUME_KEY =
-    `novelTxtBackupV61:${location.pathname}`;
+    `novelTxtBackupV62:${location.pathname}`;
 
+
+  /*
+    전역 상태
+  */
   let collectorWin =
     window.__novelBackupWin || null;
 
   let stopRequested = false;
+  let finalized = false;
+
+  let currentChapters = [];
+  let currentWorkTitle = "";
+  let currentUi = null;
+
+  let successfulSinceRotation = 0;
+
+  let activeFetchController = null;
 
   /*
-    자동 팝업이 막혀 버튼 클릭을 기다리는 동안에도
-    '지금까지 저장하고 중단'을 누르면
-    기다림을 즉시 끝내기 위한 목록
+    팝업 허용 버튼을 기다리는 Promise를
+    중단 버튼으로 깨우기 위함
   */
-  const stopWaiters = new Set();
+  const stopWaiters =
+    new Set();
 
 
   /*
-    작품 목록에서만 실행
+    작품 목록 페이지 확인
   */
   if (!/^\/novel\/\d+\/?$/.test(location.pathname)) {
     alert("작품 목록 페이지에서 실행해 주세요.");
@@ -48,10 +60,22 @@
   }
 
 
-  const sleep = (ms) =>
+  const sleep = ms =>
     new Promise(resolve =>
       setTimeout(resolve, ms)
     );
+
+
+  function makeUserStoppedError() {
+    return Object.assign(
+      new Error(
+        "사용자가 수집을 중단했습니다."
+      ),
+      {
+        userStopped: true
+      }
+    );
+  }
 
 
   function notifyStopWaiters() {
@@ -65,22 +89,21 @@
   }
 
 
-  function createUserStoppedError() {
-    return Object.assign(
-      new Error("사용자가 수집을 중단했습니다."),
-      {
-        userStopped: true
-      }
-    );
-  }
-
-
   function sanitizeFilename(value) {
     return String(value || "novel")
-      .replace(/[\\/:*?"<>|]/g, "_")
-      .replace(/\s+/g, " ")
+      .replace(
+        /[\\/:*?"<>|]/g,
+        "_"
+      )
+      .replace(
+        /\s+/g,
+        " "
+      )
       .trim()
-      .slice(0, 150);
+      .slice(
+        0,
+        150
+      );
   }
 
 
@@ -110,6 +133,7 @@
       document.querySelector(
         'meta[property="og:title"]'
       );
+
 
     if (og?.content) {
       return og.content
@@ -157,18 +181,23 @@
   function detectLastListPage(doc) {
     let max = 1;
 
+
     doc
       .querySelectorAll(
         'nav.theme-episode-pager a[href*="epage="]'
       )
       .forEach(a => {
 
-        max = Math.max(
-          max,
-          parseEpisodePage(a.href)
-        );
+        max =
+          Math.max(
+            max,
+            parseEpisodePage(
+              a.href
+            )
+          );
 
       });
+
 
     return max;
   }
@@ -176,6 +205,7 @@
 
   function parseEpisodes(doc) {
     const out = [];
+
 
     doc
       .querySelectorAll(
@@ -190,10 +220,12 @@
             )
           );
 
+
         const a =
           li.querySelector(
             'a.item-subject[href]'
           );
+
 
         if (
           !Number.isFinite(num) ||
@@ -202,8 +234,10 @@
           return;
         }
 
+
         out.push({
-          number: num,
+          number:
+            num,
 
           title:
             (
@@ -211,7 +245,10 @@
               `${num}화`
             )
               .trim()
-              .replace(/\s+/g, " "),
+              .replace(
+                /\s+/g,
+                " "
+              ),
 
           url:
             new URL(
@@ -222,18 +259,24 @@
 
       });
 
+
     return out;
   }
 
 
   /*
-    진행창
+    진행 UI
   */
   function createOverlay() {
     const root =
-      document.createElement("div");
+      document.createElement(
+        "div"
+      );
 
-    root.id = APP_ID;
+
+    root.id =
+      APP_ID;
+
 
     root.innerHTML = `
       <div
@@ -242,6 +285,7 @@
           left:50%;
           bottom:18px;
           transform:translateX(-50%);
+
           z-index:2147483647;
 
           width:min(92vw,460px);
@@ -275,9 +319,11 @@
             justify-content:space-between;
           "
         >
+
           <strong>
-            TXT 백업 v6.1
+            TXT 백업 v6.2
           </strong>
+
 
           <button
             data-close
@@ -291,6 +337,7 @@
           >
             ×
           </button>
+
         </div>
 
 
@@ -299,6 +346,7 @@
           style="
             margin-top:6px;
             color:#e5e7eb;
+
             white-space:nowrap;
             overflow:hidden;
             text-overflow:ellipsis;
@@ -309,21 +357,30 @@
         <div
           style="
             height:8px;
+
             background:#374151;
+
             border-radius:999px;
+
             overflow:hidden;
+
             margin-top:10px;
           "
         >
+
           <div
             data-bar
             style="
               height:100%;
               width:0%;
+
               background:#fff;
-              transition:width .15s linear;
+
+              transition:
+                width .15s linear;
             "
           ></div>
+
         </div>
 
 
@@ -331,7 +388,9 @@
           data-status
           style="
             margin-top:8px;
+
             color:#d1d5db;
+
             white-space:pre-line;
           "
         >
@@ -343,11 +402,17 @@
           data-auth
           style="
             display:none;
+
             margin-top:10px;
+
             padding:10px 11px;
+
             border-radius:9px;
+
             background:#3b2f16;
+
             color:#fde68a;
+
             white-space:pre-line;
           "
         ></div>
@@ -357,13 +422,22 @@
           data-stop
           style="
             width:100%;
+
             margin-top:10px;
-            border:1px solid #ef4444;
+
+            border:
+              1px solid #ef4444;
+
             border-radius:9px;
+
             padding:10px;
+
             background:#7f1d1d;
+
             color:#fff;
+
             font-weight:700;
+
             cursor:pointer;
           "
         >
@@ -375,14 +449,23 @@
           data-reopen
           style="
             display:none;
+
             width:100%;
+
             margin-top:10px;
+
             border:0;
+
             border-radius:9px;
+
             padding:10px;
+
             background:#fff;
+
             color:#111827;
+
             font-weight:700;
+
             cursor:pointer;
           "
         >
@@ -398,35 +481,51 @@
             margin-top:12px;
           "
         >
+
           <button
             data-save
             style="
               flex:1;
+
               border:0;
+
               border-radius:9px;
+
               padding:9px 10px;
+
               background:#fff;
+
               color:#111827;
+
               font-weight:700;
+
               cursor:pointer;
             "
           >
-            TXT 저장
+            TXT 다시 저장
           </button>
+
 
           <button
             data-reset
             style="
-              border:1px solid #4b5563;
+              border:
+                1px solid #4b5563;
+
               border-radius:9px;
+
               padding:9px 12px;
+
               background:transparent;
+
               color:#fff;
+
               cursor:pointer;
             "
           >
             기록 삭제
           </button>
+
         </div>
 
       </div>
@@ -505,7 +604,13 @@
         RESUME_KEY,
         JSON.stringify(state)
       );
-    } catch (_) {}
+
+    } catch (_) {
+      /*
+        localStorage 용량 초과 등은
+        수집 자체를 막지 않음.
+      */
+    }
   }
 
 
@@ -515,6 +620,7 @@
         localStorage.getItem(
           RESUME_KEY
         );
+
 
       return raw
         ? JSON.parse(raw)
@@ -535,37 +641,86 @@
   }
 
 
+  /*
+    목록 페이지 fetch
+
+    중단 버튼을 누르면 Abort 가능
+  */
   async function fetchDocument(url) {
-    const res =
-      await fetch(
-        url,
-        {
-          credentials:
-            "same-origin",
-
-          cache:
-            "no-store",
-
-          headers: {
-            Accept:
-              "text/html,application/xhtml+xml"
-          }
-        }
-      );
-
-
-    if (!res.ok) {
-      throw new Error(
-        `목록 페이지 요청 실패: HTTP ${res.status}`
-      );
+    if (stopRequested) {
+      throw makeUserStoppedError();
     }
 
 
-    return new DOMParser()
-      .parseFromString(
-        await res.text(),
-        "text/html"
-      );
+    const controller =
+      new AbortController();
+
+
+    activeFetchController =
+      controller;
+
+
+    try {
+      const res =
+        await fetch(
+          url,
+          {
+            credentials:
+              "same-origin",
+
+            cache:
+              "no-store",
+
+            signal:
+              controller.signal,
+
+            headers: {
+              Accept:
+                "text/html,application/xhtml+xml"
+            }
+          }
+        );
+
+
+      if (!res.ok) {
+        throw new Error(
+          `목록 페이지 요청 실패: HTTP ${res.status}`
+        );
+      }
+
+
+      const html =
+        await res.text();
+
+
+      return new DOMParser()
+        .parseFromString(
+          html,
+          "text/html"
+        );
+
+    } catch (err) {
+
+      if (
+        stopRequested ||
+        err?.name === "AbortError"
+      ) {
+        throw makeUserStoppedError();
+      }
+
+
+      throw err;
+
+    } finally {
+
+      if (
+        activeFetchController ===
+        controller
+      ) {
+        activeFetchController =
+          null;
+      }
+    }
   }
 
 
@@ -597,7 +752,7 @@
       page++
     ) {
       if (stopRequested) {
-        throw createUserStoppedError();
+        throw makeUserStoppedError();
       }
 
 
@@ -634,10 +789,7 @@
 
 
   /*
-    CAPTCHA / 로그인 / 인증 / 접근 확인
-
-    이런 화면은 자동 창 교체 대상으로 처리하지 않고
-    사용자가 직접 완료할 때까지 기다림.
+    인증 / CAPTCHA / 로그인 / 접근 확인
   */
   function findAuthReason(
     win,
@@ -649,16 +801,23 @@
     try {
       hay =
         `${doc?.title || ""}\n` +
+
         `${
           (
-            doc?.body?.innerText ||
+            doc?.body
+              ?.innerText ||
             ""
           ).slice(
             0,
             20000
           )
         }\n` +
-        `${win?.location?.href || ""}`;
+
+        `${
+          win?.location
+            ?.href ||
+          ""
+        }`;
 
     } catch (_) {}
 
@@ -667,7 +826,9 @@
       /\b403\b|forbidden|access\s*denied/i
         .test(hay)
     ) {
-      return "403 / 접근 확인";
+      return (
+        "403 / 접근 확인"
+      );
     }
 
 
@@ -675,7 +836,9 @@
       /captcha|캡차|자동\s*입력\s*방지|로봇이\s*아닙니다|사람인지\s*확인/i
         .test(hay)
     ) {
-      return "CAPTCHA / 사람 확인";
+      return (
+        "CAPTCHA / 사람 확인"
+      );
     }
 
 
@@ -683,7 +846,9 @@
       /본문\s*보안\s*검증에\s*실패|광고\s*검증\s*후\s*다시|일일\s*조회\s*인증이\s*필요/i
         .test(hay)
     ) {
-      return "본문 보안/조회 인증";
+      return (
+        "본문 보안/조회 인증"
+      );
     }
 
 
@@ -691,7 +856,9 @@
       /로그인이\s*필요합니다/i
         .test(hay)
     ) {
-      return "로그인";
+      return (
+        "로그인"
+      );
     }
 
 
@@ -709,14 +876,17 @@
           win.location.href
         );
 
+
       const expected =
         new URL(
           episodeUrl
         );
 
+
       return (
         current.origin ===
           expected.origin &&
+
         current.pathname ===
           expected.pathname
       );
@@ -728,7 +898,7 @@
 
 
   /*
-    수집창 새로 열기 시도
+    새 수집창 열기
   */
   function tryOpenCollector() {
     if (stopRequested) {
@@ -751,8 +921,10 @@
         collectorWin =
           win;
 
+
         window.__novelBackupWin =
           win;
+
 
         return true;
       }
@@ -764,15 +936,6 @@
   }
 
 
-  /*
-    수집창이 없으면 새로 준비.
-
-    자동 window.open()이 팝업 차단되면
-    '새 수집창 열고 계속' 버튼 표시.
-
-    그 상태에서 중단 버튼을 누르면
-    Promise도 바로 끝남.
-  */
   async function ensureCollectorWindow(
     ui
   ) {
@@ -793,11 +956,15 @@
       "새 수집창을 준비하는 중...";
 
 
+    /*
+      자동 팝업 시도
+    */
     if (
       tryOpenCollector()
     ) {
       ui.reopen.style.display =
         "none";
+
 
       return true;
     }
@@ -808,6 +975,10 @@
     }
 
 
+    /*
+      Safari 등이 자동 팝업을 막으면
+      사용자 버튼 클릭
+    */
     ui.status.textContent =
       "새 수집창을 자동으로 열 수 없습니다.\n" +
       "아래 버튼을 한 번 눌러 주세요.";
@@ -817,73 +988,98 @@
       "block";
 
 
-    return await new Promise(resolve => {
-      let settled = false;
+    return await new Promise(
+      resolve => {
+
+        let settled =
+          false;
 
 
-      const finish = value => {
-        if (settled) {
-          return;
-        }
+        const finish =
+          value => {
 
-        settled = true;
+            if (settled) {
+              return;
+            }
 
-        stopWaiters.delete(
+
+            settled =
+              true;
+
+
+            stopWaiters.delete(
+              stopHandler
+            );
+
+
+            resolve(
+              value
+            );
+          };
+
+
+        const stopHandler =
+          () => {
+
+            ui.reopen.style.display =
+              "none";
+
+
+            finish(
+              false
+            );
+          };
+
+
+        stopWaiters.add(
           stopHandler
         );
 
-        resolve(value);
-      };
+
+        ui.reopen.onclick =
+          () => {
+
+            if (stopRequested) {
+              finish(false);
+              return;
+            }
 
 
-      const stopHandler = () => {
-        ui.reopen.style.display =
-          "none";
-
-        finish(false);
-      };
-
-
-      stopWaiters.add(
-        stopHandler
-      );
+            if (
+              tryOpenCollector()
+            ) {
+              ui.reopen.style.display =
+                "none";
 
 
-      ui.reopen.onclick = () => {
-        if (stopRequested) {
-          finish(false);
-          return;
-        }
+              finish(
+                true
+              );
 
+            } else {
 
-        if (
-          tryOpenCollector()
-        ) {
-          ui.reopen.style.display =
-            "none";
+              alert(
+                "새 창을 열 수 없습니다.\n" +
+                "이 사이트의 팝업을 허용해 주세요."
+              );
 
-          finish(true);
+            }
+          };
 
-        } else {
-          alert(
-            "새 창을 열 수 없습니다.\n" +
-            "이 사이트의 팝업을 허용해 주세요."
-          );
-        }
-      };
-    });
+      }
+    );
   }
 
 
   /*
-    정상 20화 주기 창 교체
+    20화마다 정상적인 수집창 교체
   */
   async function rotateCollectorWindow(
     ui,
     completedEpisode
   ) {
     if (stopRequested) {
-      throw createUserStoppedError();
+      throw makeUserStoppedError();
     }
 
 
@@ -905,6 +1101,7 @@
     collectorWin =
       null;
 
+
     window.__novelBackupWin =
       null;
 
@@ -915,7 +1112,7 @@
 
 
     if (stopRequested) {
-      throw createUserStoppedError();
+      throw makeUserStoppedError();
     }
 
 
@@ -929,7 +1126,7 @@
       !ok ||
       stopRequested
     ) {
-      throw createUserStoppedError();
+      throw makeUserStoppedError();
     }
 
 
@@ -945,14 +1142,14 @@
 
 
   /*
-    회차 한 개 수집
+    한 화 수집
   */
   async function loadEpisodeTextOnce(
     episode,
     ui
   ) {
     if (stopRequested) {
-      throw createUserStoppedError();
+      throw makeUserStoppedError();
     }
 
 
@@ -963,9 +1160,11 @@
 
 
     if (!ok) {
+
       if (stopRequested) {
-        throw createUserStoppedError();
+        throw makeUserStoppedError();
       }
+
 
       throw Object.assign(
         new Error(
@@ -984,14 +1183,18 @@
         let finished =
           false;
 
+
         let waitingForManualAuth =
           false;
+
 
         let authStartedAt =
           null;
 
+
         const startedAt =
           Date.now();
+
 
         let timer =
           null;
@@ -1020,24 +1223,29 @@
           ui.auth.style.display =
             "none";
 
+
           ui.auth.textContent =
             "";
 
 
-          fn(value);
+          fn(
+            value
+          );
         }
 
 
         /*
-          회차 이동
+          목표 회차로 이동
         */
         try {
           collectorWin.location.href =
             episode.url;
 
+
           collectorWin.focus();
 
         } catch (_) {
+
           finish(
             reject,
 
@@ -1051,6 +1259,7 @@
             )
           );
 
+
           return;
         }
 
@@ -1060,20 +1269,22 @@
             () => {
 
               /*
-                사용자가 중단 버튼을 누른 경우
+                중단 버튼
               */
               if (stopRequested) {
+
                 finish(
                   reject,
-                  createUserStoppedError()
+                  makeUserStoppedError()
                 );
+
 
                 return;
               }
 
 
               /*
-                수집창을 실수로 닫은 경우
+                수집창 실수로 닫음
               */
               if (
                 !collectorWin ||
@@ -1087,10 +1298,12 @@
                       `${episode.number}화: 수집창이 닫혔습니다.`
                     ),
                     {
-                      recoverable: true
+                      recoverable:
+                        true
                     }
                   )
                 );
+
 
                 return;
               }
@@ -1109,17 +1322,17 @@
 
 
                 /*
-                  인증 / CAPTCHA / 접근 확인
-
-                  자동 새창 교체하지 않고
-                  직접 완료 대기
+                  인증 화면은
+                  자동 창 교체하지 않음
                 */
                 if (authReason) {
+
                   if (
                     !waitingForManualAuth
                   ) {
                     waitingForManualAuth =
                       true;
+
 
                     authStartedAt =
                       Date.now();
@@ -1147,9 +1360,10 @@
 
                   if (
                     authStartedAt &&
+
                     Date.now() -
                       authStartedAt >
-                    MANUAL_AUTH_TIMEOUT_MS
+                      MANUAL_AUTH_TIMEOUT_MS
                   ) {
                     finish(
                       reject,
@@ -1166,7 +1380,7 @@
 
 
                 /*
-                  인증 화면이 사라짐
+                  인증 완료 후
                 */
                 if (
                   waitingForManualAuth
@@ -1174,15 +1388,13 @@
                   ui.status.textContent =
                     `${episode.number}화 인증 완료 확인 중...`;
 
+
                   ui.auth.textContent =
                     `✅ 확인 화면이 사라졌습니다.\n` +
                     `본문을 기다리는 중...`;
                 }
 
 
-                /*
-                  아직 목표 회차에 도착하지 않았으면 기다림
-                */
                 if (
                   !sameEpisode(
                     collectorWin,
@@ -1197,13 +1409,17 @@
                   정상 본문
                 */
                 const text =
-                  collectorWin.__novelTTSText;
+                  collectorWin
+                    .__novelTTSText;
 
 
                 if (
                   typeof text ===
                     "string" &&
-                  text.trim().length >
+
+                  text
+                    .trim()
+                    .length >
                     0
                 ) {
                   finish(
@@ -1220,6 +1436,7 @@
                       )
                       .trim()
                   );
+
 
                   return;
                 }
@@ -1240,20 +1457,20 @@
 
                 /*
                   일반 로딩 실패
-
-                  인증 상태가 아닌 경우에만
-                  자동복구 대상으로 처리
                 */
                 if (
                   visibleMessage &&
+
                   !/본문\s*불러오는\s*중/i
                     .test(
                       visibleMessage
                     ) &&
+
                   /실패|오류|준비되지\s*않았습니다/i
                     .test(
                       visibleMessage
                     ) &&
+
                   !waitingForManualAuth
                 ) {
                   finish(
@@ -1270,15 +1487,17 @@
                     )
                   );
 
+
                   return;
                 }
 
 
                 /*
-                  일반 timeout
+                  타임아웃
                 */
                 if (
                   !waitingForManualAuth &&
+
                   Date.now() -
                     startedAt >
                     NORMAL_TIMEOUT_MS
@@ -1305,18 +1524,17 @@
               } catch (_) {
 
                 /*
-                  다른 origin의 확인 화면 등으로
-                  document 접근이 안 되는 경우.
+                  다른 origin 인증 화면 등
 
-                  인증/확인 가능성이 있으므로
-                  자동으로 새 창을 갈아치우지 않고
-                  사용자가 직접 완료할 때까지 대기.
+                  자동 교체하지 않고
+                  사용자가 직접 처리할 때까지 기다림.
                 */
                 if (
                   !waitingForManualAuth
                 ) {
                   waitingForManualAuth =
                     true;
+
 
                   authStartedAt =
                     Date.now();
@@ -1338,6 +1556,7 @@
 
                 if (
                   authStartedAt &&
+
                   Date.now() -
                     authStartedAt >
                     MANUAL_AUTH_TIMEOUT_MS
@@ -1355,17 +1574,16 @@
             },
             POLL_MS
           );
+
       }
     );
   }
 
 
   /*
-    창 실수로 닫힘 / 일반 로딩 오류 등은
-    새 창으로 같은 회차부터 다시 시도
-
-    사용자가 중단 버튼을 누른 경우에는
-    절대 자동복구하지 않음.
+    창을 실수로 닫았거나
+    일반적인 로딩 실패라면
+    같은 화부터 자동 재시도
   */
   async function loadEpisodeWithRecovery(
     episode,
@@ -1375,8 +1593,9 @@
 
 
     while (true) {
+
       if (stopRequested) {
-        throw createUserStoppedError();
+        throw makeUserStoppedError();
       }
 
 
@@ -1389,20 +1608,17 @@
       } catch (err) {
 
         /*
-          사용자 중단은 즉시 종료
+          사용자 중단은
+          자동복구 금지
         */
         if (
           err?.userStopped ||
           stopRequested
         ) {
-          throw createUserStoppedError();
+          throw makeUserStoppedError();
         }
 
 
-        /*
-          복구 불가능 오류 또는
-          최대 재시도 횟수 초과
-        */
         if (
           !err?.recoverable ||
           attempt >=
@@ -1421,9 +1637,6 @@
           `(${attempt}/${MAX_RECOVERY_RETRIES})`;
 
 
-        /*
-          기존 창 정리
-        */
         try {
           if (
             collectorWin &&
@@ -1437,6 +1650,7 @@
         collectorWin =
           null;
 
+
         window.__novelBackupWin =
           null;
 
@@ -1444,19 +1658,13 @@
         await sleep(
           700
         );
-
-
-        /*
-          다음 반복에서
-          같은 episode를 다시 받음
-        */
       }
     }
   }
 
 
   /*
-    TXT 생성
+    TXT 만들기
   */
   function buildTxt(
     workTitle,
@@ -1471,6 +1679,7 @@
       `${workTitle}_${actualStart}~${actualEnd}화`
     );
 
+
     lines.push("");
     lines.push("");
 
@@ -1482,11 +1691,14 @@
         `##${ch.number}화`
       );
 
+
       lines.push("");
+
 
       lines.push(
         ch.text
       );
+
 
       lines.push("");
       lines.push("");
@@ -1500,7 +1712,7 @@
 
 
   /*
-    TXT 다운로드
+    TXT 다운로드 준비 + 즉시 다운로드
   */
   function prepareTxtDownload(
     ui,
@@ -1536,8 +1748,10 @@
       a.href =
         objectUrl;
 
+
       a.download =
         filename;
+
 
       a.rel =
         "noopener";
@@ -1548,7 +1762,9 @@
           a
         );
 
+
       a.click();
+
 
       a.remove();
     }
@@ -1563,14 +1779,15 @@
 
 
     /*
-      가능하면 자동 다운로드
-      브라우저가 막으면 TXT 저장 버튼 사용
+      자동 다운로드
     */
-    try {
-      save();
-    } catch (_) {}
+    save();
 
 
+    /*
+      버튼으로 다시 저장할 시간을 위해
+      URL은 바로 없애지 않음
+    */
     setTimeout(
       () => {
         URL.revokeObjectURL(
@@ -1582,29 +1799,197 @@
   }
 
 
+  /*
+    ★ v6.2 핵심
+
+    루프 종료를 기다리지 않고
+    현재까지 완전히 수집된 회차를
+    바로 TXT로 만들어 다운로드
+  */
+  function finalizePartialImmediately() {
+    if (finalized) {
+      return;
+    }
+
+
+    finalized =
+      true;
+
+
+    stopRequested =
+      true;
+
+
+    const ui =
+      currentUi;
+
+
+    /*
+      현재 fetch가 있으면 즉시 취소
+    */
+    try {
+      if (activeFetchController) {
+        activeFetchController.abort();
+      }
+    } catch (_) {}
+
+
+    activeFetchController =
+      null;
+
+
+    /*
+      팝업 대기 Promise 깨우기
+    */
+    notifyStopWaiters();
+
+
+    /*
+      현재 수집창 종료
+    */
+    try {
+      if (
+        collectorWin &&
+        !collectorWin.closed
+      ) {
+        collectorWin.close();
+      }
+    } catch (_) {}
+
+
+    collectorWin =
+      null;
+
+
+    window.__novelBackupWin =
+      null;
+
+
+    if (ui) {
+      ui.stop.style.display =
+        "none";
+
+
+      ui.reopen.style.display =
+        "none";
+
+
+      ui.auth.style.display =
+        "none";
+    }
+
+
+    /*
+      아직 완전히 받은 화가 하나도 없음
+    */
+    if (
+      !currentChapters.length
+    ) {
+      if (ui) {
+        ui.status.textContent =
+          "수집을 중단했습니다.\n" +
+          "아직 완전히 수집된 회차가 없어 " +
+          "저장할 TXT가 없습니다.";
+      }
+
+
+      clearResumeState();
+
+
+      return;
+    }
+
+
+    /*
+      마지막까지 정상 완료된 화만 사용
+    */
+    const chapters =
+      [...currentChapters]
+        .sort(
+          (a, b) =>
+            a.number -
+            b.number
+        );
+
+
+    const actualStart =
+      chapters[0].number;
+
+
+    const actualEnd =
+      chapters[
+        chapters.length - 1
+      ].number;
+
+
+    const txt =
+      buildTxt(
+        currentWorkTitle,
+        chapters,
+        actualStart,
+        actualEnd
+      );
+
+
+    const filename =
+      sanitizeFilename(
+        `${currentWorkTitle}_${actualStart}~${actualEnd}화.txt`
+      );
+
+
+    /*
+      TXT를 받았으므로
+      임시 진행 기록 제거
+    */
+    clearResumeState();
+
+
+    if (ui) {
+      ui.status.innerHTML =
+        `<b>수집 중단 완료</b><br>` +
+        `${actualStart}~${actualEnd}화까지 저장 완료<br>` +
+        `${chapters.length}개 회차를 TXT로 준비했습니다.`;
+    }
+
+
+    prepareTxtDownload(
+      ui,
+      filename,
+      txt
+    );
+  }
+
+
   async function main() {
     const ui =
       createOverlay();
 
 
-    const workTitle =
+    currentUi =
+      ui;
+
+
+    currentWorkTitle =
       getWorkTitle();
 
 
     ui.title.textContent =
-      workTitle;
+      currentWorkTitle;
 
 
     /*
-      중단 버튼
+      ★ 중단 버튼
 
-      현재 받는 중인 회차는 저장하지 않고,
-      직전까지 완전히 완료된 회차만 TXT에 넣음.
+      여기서 바로 finalizePartialImmediately() 실행.
+      메인 수집 루프가 끝날 때까지 기다리지 않음.
     */
     ui.stop.onclick =
       () => {
 
-        if (stopRequested) {
+        if (
+          stopRequested ||
+          finalized
+        ) {
           return;
         }
 
@@ -1621,64 +2006,23 @@
         }
 
 
-        stopRequested =
-          true;
-
-
         ui.stop.disabled =
           true;
 
 
         ui.stop.textContent =
-          "중단 중...";
-
-
-        ui.reopen.style.display =
-          "none";
-
-
-        ui.auth.style.display =
-          "none";
-
-
-        ui.status.textContent =
-          "현재 수집을 중단하는 중...\n" +
-          "완전히 저장된 회차까지만 TXT로 준비합니다.";
+          "저장 중...";
 
 
         /*
-          팝업 열기 버튼 등을 기다리는 Promise도
-          즉시 중단시킴
+          즉시 다운로드
         */
-        notifyStopWaiters();
-
-
-        /*
-          현재 받고 있던 수집창도 닫음.
-
-          stopRequested=true이므로
-          자동복구는 실행되지 않음.
-        */
-        try {
-          if (
-            collectorWin &&
-            !collectorWin.closed
-          ) {
-            collectorWin.close();
-          }
-        } catch (_) {}
-
-
-        collectorWin =
-          null;
-
-        window.__novelBackupWin =
-          null;
+        finalizePartialImmediately();
       };
 
 
     /*
-      최초 수집창 확보
+      최초 수집창 준비
     */
     const initialCollector =
       await ensureCollectorWindow(
@@ -1687,16 +2031,14 @@
 
 
     if (
-      !initialCollector &&
+      finalized ||
       stopRequested
     ) {
-      ui.status.textContent =
-        "수집을 중단했습니다.\n" +
-        "아직 완료된 회차가 없어 저장할 TXT가 없습니다.";
+      return;
+    }
 
-      ui.stop.style.display =
-        "none";
 
+    if (!initialCollector) {
       return;
     }
 
@@ -1716,16 +2058,10 @@
     } catch (err) {
 
       if (
-        err?.userStopped ||
-        stopRequested
+        finalized ||
+        stopRequested ||
+        err?.userStopped
       ) {
-        ui.status.textContent =
-          "수집을 중단했습니다.\n" +
-          "아직 완료된 회차가 없어 저장할 TXT가 없습니다.";
-
-        ui.stop.style.display =
-          "none";
-
         return;
       }
 
@@ -1734,13 +2070,25 @@
         err?.message ||
         "회차 목록을 가져오지 못했습니다.";
 
+
       return;
     }
 
 
-    if (!allEpisodes.length) {
+    if (
+      finalized ||
+      stopRequested
+    ) {
+      return;
+    }
+
+
+    if (
+      !allEpisodes.length
+    ) {
       ui.status.textContent =
         "회차 목록을 찾지 못했습니다.";
+
 
       return;
     }
@@ -1756,18 +2104,13 @@
       ].number;
 
 
-    let chapters = [];
-
     let startEpisode;
 
     let endEpisode;
 
-    let successfulSinceRotation =
-      0;
-
 
     /*
-      이전 기록 복구
+      이전 기록 확인
     */
     const resume =
       loadResumeState();
@@ -1775,14 +2118,18 @@
 
     if (
       resume &&
+
       resume.path ===
         location.pathname &&
+
       Array.isArray(
         resume.chapters
       ) &&
+
       Number.isInteger(
         resume.nextEpisode
       ) &&
+
       Number.isInteger(
         resume.endEpisode
       )
@@ -1797,8 +2144,16 @@
         );
 
 
+      if (
+        finalized ||
+        stopRequested
+      ) {
+        return;
+      }
+
+
       if (useResume) {
-        chapters =
+        currentChapters =
           resume.chapters;
 
 
@@ -1824,7 +2179,7 @@
 
 
     /*
-      새 작업 범위 선택
+      새 작업
     */
     if (
       !Number.isInteger(
@@ -1842,7 +2197,9 @@
 
 
       if (
-        startRaw === null
+        startRaw === null ||
+        finalized ||
+        stopRequested
       ) {
         return;
       }
@@ -1859,7 +2216,9 @@
 
 
       if (
-        endRaw === null
+        endRaw === null ||
+        finalized ||
+        stopRequested
       ) {
         return;
       }
@@ -1891,6 +2250,7 @@
       ) {
         ui.status.textContent =
           "화수는 숫자로 입력해야 합니다.";
+
 
         return;
       }
@@ -1939,37 +2299,40 @@
       );
 
 
-    if (!targets.length) {
+    if (
+      !targets.length
+    ) {
       ui.status.textContent =
         "해당 범위에 회차가 없습니다.";
+
 
       return;
     }
 
 
     /*
-      실제 회차 수집
+      실제 수집
     */
     for (
       let i = 0;
       i < targets.length;
       i++
     ) {
+      if (
+        stopRequested ||
+        finalized
+      ) {
+        return;
+      }
+
+
       const ep =
         targets[i];
 
 
-      if (stopRequested) {
-        break;
-      }
-
-
-      /*
-        진행률
-      */
       const originalStart =
-        chapters.length
-          ? chapters[0].number
+        currentChapters.length
+          ? currentChapters[0].number
           : startEpisode;
 
 
@@ -1982,19 +2345,17 @@
         );
 
 
-      const completed =
-        chapters.length;
-
-
       ui.bar.style.width =
         `${
           Math.min(
             100,
+
             Math.round(
               (
-                completed /
+                currentChapters.length /
                 totalExpected
-              ) * 100
+              ) *
+              100
             )
           )
         }%`;
@@ -2016,19 +2377,21 @@
 
 
         /*
-          중단 요청이 본문 반환 직전에 들어온 경우도
-          현재 화를 저장하지 않음.
+          중단 버튼이 본문 반환 순간 눌렸다면
+          이 화는 currentChapters에 넣지 않음.
         */
-        if (stopRequested) {
-          break;
+        if (
+          stopRequested ||
+          finalized
+        ) {
+          return;
         }
 
 
         /*
-          여기까지 왔을 때만
-          해당 회차가 완전히 저장된 것으로 인정
+          완전히 성공한 화만 저장
         */
-        chapters.push({
+        currentChapters.push({
           number:
             ep.number,
 
@@ -2043,13 +2406,15 @@
 
 
         /*
-          매 회차 성공 시 진행상황 저장
+          회차 하나 성공할 때마다
+          이어받기 기록 갱신
         */
         saveResumeState({
           path:
             location.pathname,
 
-          workTitle,
+          workTitle:
+            currentWorkTitle,
 
           nextEpisode:
             ep.number + 1,
@@ -2058,14 +2423,15 @@
 
           successfulSinceRotation,
 
-          chapters
+          chapters:
+            currentChapters
         });
 
 
         /*
-          마지막 화가 아니면서
-          현재 수집창에서 20개 회차를 정상적으로
-          완료했으면 수집창 교체
+          마지막 회차가 아니고
+          20개를 정상 수집했으면
+          수집창 교체
         */
         const hasMoreEpisodes =
           i <
@@ -2074,6 +2440,7 @@
 
         if (
           hasMoreEpisodes &&
+
           successfulSinceRotation >=
             ROTATE_EVERY_EPISODES
         ) {
@@ -2083,18 +2450,24 @@
           );
 
 
+          if (
+            stopRequested ||
+            finalized
+          ) {
+            return;
+          }
+
+
           successfulSinceRotation =
             0;
 
 
-          /*
-            창 교체 후 counter 초기화 상태 저장
-          */
           saveResumeState({
             path:
               location.pathname,
 
-            workTitle,
+            workTitle:
+              currentWorkTitle,
 
             nextEpisode:
               ep.number + 1,
@@ -2103,41 +2476,46 @@
 
             successfulSinceRotation,
 
-            chapters
+            chapters:
+              currentChapters
           });
         }
 
       } catch (err) {
 
         /*
-          사용자가 중단 버튼을 누른 경우
-          finalization 단계로 이동
+          사용자가 이미 즉시 저장 완료했다면
+          아무것도 더 하지 않음
         */
         if (
-          err?.userStopped ||
-          stopRequested
+          finalized ||
+          stopRequested ||
+          err?.userStopped
         ) {
-          break;
+          return;
         }
 
 
-        /*
-          일반 오류
-        */
         ui.status.innerHTML =
           `<b>${ep.number}화에서 중단됨</b><br>` +
+
           `${escapeHtml(
             err?.message ||
             String(err)
           )}<br>` +
+
           `진행상황은 저장되어 있습니다.`;
+
 
         return;
       }
 
 
-      if (stopRequested) {
-        break;
+      if (
+        stopRequested ||
+        finalized
+      ) {
+        return;
       }
 
 
@@ -2148,55 +2526,52 @@
 
 
     /*
-      완전히 저장된 회차 기준 정렬
+      정상적으로 끝까지 완료
     */
-    chapters.sort(
+    if (
+      finalized ||
+      stopRequested
+    ) {
+      return;
+    }
+
+
+    currentChapters.sort(
       (a, b) =>
         a.number -
         b.number
     );
 
 
-    /*
-      한 화도 완료되지 않은 상태에서
-      중단한 경우
-    */
-    if (!chapters.length) {
+    if (
+      !currentChapters.length
+    ) {
       ui.status.textContent =
-        stopRequested
-          ? (
-              "수집을 중단했습니다.\n" +
-              "아직 완료된 회차가 없어 " +
-              "저장할 TXT가 없습니다."
-            )
-          : "저장할 본문이 없습니다.";
-
-
-      ui.stop.style.display =
-        "none";
-
-
-      clearResumeState();
+        "저장할 본문이 없습니다.";
 
 
       return;
     }
 
 
+    finalized =
+      true;
+
+
     const actualStart =
-      chapters[0].number;
+      currentChapters[0].number;
 
 
     const actualEnd =
-      chapters[
-        chapters.length - 1
+      currentChapters[
+        currentChapters.length - 1
       ].number;
 
 
     const txt =
       buildTxt(
-        workTitle,
-        chapters,
+        currentWorkTitle,
+        currentChapters,
         actualStart,
         actualEnd
       );
@@ -2204,22 +2579,15 @@
 
     const filename =
       sanitizeFilename(
-        `${workTitle}_${actualStart}~${actualEnd}화.txt`
+        `${currentWorkTitle}_${actualStart}~${actualEnd}화.txt`
       );
 
 
-    /*
-      사용자 중단이든 정상 완료든
-      지금 TXT를 만들어 받는 것이므로
-      임시 이어받기 기록 제거
-    */
     clearResumeState();
 
 
     ui.bar.style.width =
-      stopRequested
-        ? ui.bar.style.width
-        : "100%";
+      "100%";
 
 
     ui.stop.style.display =
@@ -2234,22 +2602,16 @@
       "none";
 
 
-    if (stopRequested) {
-      ui.status.innerHTML =
-        `<b>수집을 중단했습니다.</b><br>` +
-        `${actualStart}~${actualEnd}화까지 저장 완료<br>` +
-        `${chapters.length}개 회차를 TXT로 준비했습니다.`;
-
-    } else {
-      ui.status.innerHTML =
-        `<b>${actualStart}~${actualEnd}화 완료</b><br>` +
-        `${chapters.length}개 회차를 TXT로 준비했습니다.`;
-    }
+    ui.status.innerHTML =
+      `<b>${actualStart}~${actualEnd}화 완료</b><br>` +
+      `${currentChapters.length}개 회차를 TXT로 준비했습니다.`;
 
 
     ui.reset.onclick =
       () => {
+
         clearResumeState();
+
 
         ui.status.textContent +=
           "\n이어받기 기록을 삭제했습니다.";
@@ -2264,7 +2626,7 @@
 
 
     /*
-      남아있는 수집창 종료
+      마지막 수집창 종료
     */
     try {
       if (
@@ -2279,30 +2641,36 @@
     collectorWin =
       null;
 
+
     window.__novelBackupWin =
       null;
   }
 
 
   main()
-    .catch(err => {
+    .catch(
+      err => {
 
-      console.error(err);
+        console.error(
+          err
+        );
 
 
-      if (
-        err?.userStopped ||
-        stopRequested
-      ) {
-        return;
+        if (
+          finalized ||
+          stopRequested ||
+          err?.userStopped
+        ) {
+          return;
+        }
+
+
+        alert(
+          err?.message ||
+          String(err)
+        );
+
       }
-
-
-      alert(
-        err?.message ||
-        String(err)
-      );
-
-    });
+    );
 
 })();
